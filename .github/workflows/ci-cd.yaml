@@ -28,8 +28,7 @@ jobs:
         run: pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Lint
-        run: ruff check . --fix
-        
+        run: ruff check .
 
       - name: Train model (test fixture + accuracy gate lives in tests)
         run: python scripts/train.py
@@ -56,8 +55,21 @@ jobs:
         with:
           cluster_name: ci
 
+      # `kind load docker-image` reads from Docker's classic image store.
+      # Recent Docker versions on GH runners default to the containerd
+      # image store for builds, so that command can report success while
+      # loading nothing kind's node can see. `docker save` reads from
+      # whichever store was actually used, so pipe it straight into the
+      # node's containerd instead — this works regardless of store.
       - name: Load image into kind
-        run: kind load docker-image iris-classifier:ci --name ci
+        run: docker save iris-classifier:ci | docker exec -i ci-control-plane ctr -n=k8s.io images import -
+
+      - name: Verify image is visible to the node
+        run: |
+          docker exec ci-control-plane crictl images | grep iris-classifier || {
+            echo "::error::image not found inside kind node after load"
+            exit 1
+          }
 
       - name: Deploy
         run: |
