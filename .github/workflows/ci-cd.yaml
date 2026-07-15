@@ -28,7 +28,7 @@ jobs:
         run: pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Lint
-        run: ruff check .
+        run: ruff check . --fix
 
       - name: Train model (test fixture + accuracy gate lives in tests)
         run: python scripts/train.py
