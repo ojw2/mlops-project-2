@@ -1,0 +1,123 @@
+name: ci-cd
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/iris-classifier
+
+jobs:
+  # ---------------------------------------------------------------
+  # 1. Lint + unit/API tests. Fast feedback, runs on every push/PR.
+  # ---------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Train model (test fixture + accuracy gate lives in tests)
+        run: python scripts/train.py
+
+      - name: Run tests
+        run: pytest -v
+
+  # ---------------------------------------------------------------
+  # 2. Build the image, deploy it into a throwaway kind cluster
+  #    inside CI, and smoke-test the live endpoint. This is the
+  #    "would this actually work on k8s?" gate.
+  # ---------------------------------------------------------------
+  integration:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t iris-classifier:ci .
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ci
+
+      - name: Load image into kind
+        run: kind load docker-image iris-classifier:ci --name ci
+
+      - name: Deploy
+        run: |
+          cd k8s/overlays/local
+          kustomize edit set image iris-classifier=iris-classifier:ci
+          kubectl apply -k .
+          kubectl rollout status deployment/iris-classifier --timeout=120s
+
+      - name: Smoke test
+        run: |
+          kubectl port-forward svc/iris-classifier 8080:80 &
+          sleep 3
+          curl -sf localhost:8080/readyz
+          RESPONSE=$(curl -sf -X POST localhost:8080/predict \
+            -H 'Content-Type: application/json' \
+            -d '{"sepal_length": 5.1, "sepal_width": 3.5, "petal_length": 1.4, "petal_width": 0.2}')
+          echo "$RESPONSE"
+          echo "$RESPONSE" | grep -q '"prediction"' || exit 1
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -o wide
+          kubectl describe deployment iris-classifier
+          kubectl logs -l app=iris-classifier --tail=100
+
+  # ---------------------------------------------------------------
+  # 3. Push versioned image to GHCR. Only on main / version tags —
+  #    PRs never publish images.
+  # ---------------------------------------------------------------
+  publish:
+    needs: integration
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=ref,event=tag
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
