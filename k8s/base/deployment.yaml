@@ -46,4 +46,5 @@ spec:
             periodSeconds: 5
           securityContext:
             runAsNonRoot: true
+            runAsUser: 1000   # matches the UID pinned in the Dockerfile
             allowPrivilegeEscalation: false

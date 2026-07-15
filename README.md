@@ -66,6 +66,15 @@ kubectl rollout status deployment/iris-classifier
 
 Your cluster now pulls the exact image CI tested — the same artifact, not a rebuild. That's the core CD principle: **build once, promote the same artifact everywhere.**
 
+## Troubleshooting
+
+**Pods stuck at `CreateContainerError` / "no image is found", even though "Load image into kind" said it succeeded.**
+This is a Docker image-store mismatch, not a k8s problem. `kind load docker-image` reads from Docker's classic image store; recent Docker versions default builds to the containerd image store instead, so the load step can report success while loading nothing the kind node can actually see. The workflow works around this by piping `docker save` directly into the node's containerd (`ctr images import`) instead, which works regardless of which store Docker used — followed by a `crictl images` check that fails loudly if the image really is missing. If you hit this again on a manifest change, run `docker exec ci-control-plane crictl images` yourself to confirm what the node can see before debugging the Deployment.
+
+**`kubectl describe pod` is your first move for any pod-level failure**, before diagnosing further — the events section says exactly which of {image, probe, resources, mount} is at fault.
+
+**`CreateContainerConfigError` with `runAsNonRoot: true` set.** This means the image was found and pulled fine — it's a step further than the image-store issue above. It happens when kubelet can't confidently resolve the image's `USER` (set by name, e.g. `USER appuser`) to a numeric UID before the container starts, so it fails closed rather than risk running as root. Fix: pin a numeric UID in both places — `useradd --uid 1000 ...` / `USER 1000` in the Dockerfile, and `runAsUser: 1000` in the pod's `securityContext` — so there's no name-to-UID resolution step for kubelet to get wrong.
+
 ## Exercises
 
 1. **Break the accuracy gate.** Cripple the model in `train.py`, open a PR, watch `test` fail and block merge. Add branch protection requiring the checks to pass.

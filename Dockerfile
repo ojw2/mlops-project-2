@@ -13,15 +13,17 @@ RUN python scripts/train.py
 # --- Stage 2: runtime image (no training deps beyond what inference needs)
 FROM python:3.12-slim
 
-# Run as non-root (k8s best practice)
-RUN useradd --create-home appuser
+# Run as non-root (k8s best practice). Numeric UID pinned explicitly —
+# some kubelet/containerd combos can't reliably resolve a username to a
+# UID during the runAsNonRoot check and fail closed (CreateContainerConfigError).
+RUN useradd --uid 1000 --create-home appuser
 WORKDIR /home/appuser
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --from=trainer /build/app/ app/
-USER appuser
+USER 1000
 
 EXPOSE 8000
 
